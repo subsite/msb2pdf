@@ -68,3 +68,7 @@ Annotation data in the database:
   - Crop settings don't affect annotation coordinates.
 - **Stamp anchors:** the stored point is about 0.87 × stamp size above the notehead.
 - **Rotated pages:** coordinates are in the visible (rotated) orientation.
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).

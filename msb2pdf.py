@@ -11,6 +11,9 @@ Songs that are in no collection go to "_No collection". A song that is in
 several collections is written to each of those folders.
 
 Requires PyMuPDF:  pip install pymupdf   (or in a venv / pipx)
+
+Copyright (C) 2026 Fredrik Welander
+Licensed under the GNU General Public License v3.0; see LICENSE.
 """
 import os
 import re
