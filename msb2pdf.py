@@ -9,7 +9,8 @@ Usage:
     -y, --yes   overwrite an existing OUTPUT_DIR without asking.
 
 If OUTPUT_DIR already has files in it you are asked before it is replaced.
-Its old contents are deleted only after the backup has been read successfully.
+The new export is built next to it and swapped in when complete, so the old
+one is kept if anything fails.
 
 Songs that are in no collection go to "_No collection". A song that is in
 several collections is written to each of those folders.
@@ -26,6 +27,7 @@ import sqlite3
 import struct
 import sys
 import tempfile
+import time
 
 try:
     import pymupdf as fitz
@@ -355,7 +357,7 @@ def unique(path):
 
 
 def confirm_overwrite(outdir, msb, assume_yes):
-    """Return True if outdir should be cleared before writing."""
+    """Ask before replacing a non-empty outdir; exit if the answer is no."""
     if not os.path.isdir(outdir):
         if os.path.exists(outdir):
             sys.exit(f'{outdir} exists and is not a folder.')
@@ -395,39 +397,72 @@ def main():
     msb = args[0]
     if not os.path.isfile(msb):
         sys.exit(f'Backup not found: {msb}')
-    outdir = args[1] if len(args) > 1 else os.path.splitext(msb)[0] + '_pdf'
-    clear = confirm_overwrite(outdir, msb, opts & {'-y', '--yes'})
+    outdir = os.path.normpath(args[1] if len(args) > 1 else os.path.splitext(msb)[0] + '_pdf')
+    confirm_overwrite(outdir, msb, opts & {'-y', '--yes'})
 
-    with tempfile.TemporaryDirectory() as work:
-        print('Reading backup...')
-        dbpath, filedir = extract(msb, work)
-        if clear:
-            shutil.rmtree(outdir)
-        os.makedirs(outdir, exist_ok=True)
-        c = sqlite3.connect(dbpath)
-        colls = {}
-        for sid, name in c.execute('select cs.SongId,c.Name from CollectionSong cs '
-                                   'join Collections c on c.Id=cs.CollectionId'):
-            colls.setdefault(sid, []).append(name)
-        songs = c.execute('select Id,Title from Songs order by Title collate nocase').fetchall()
-        n_pdf = n_ann = 0
-        for i, (sid, title) in enumerate(songs, 1):
-            print(f'[{i}/{len(songs)}] {title}')
-            doc = build_song(c, filedir, sid, title)
-            if doc is None:
-                continue
-            n_ann += draw_annotations(c, doc, sid)
-            folders = ['.'] if flat else [safe(x) for x in colls.get(sid, ['_No collection'])]
-            data = doc.tobytes(garbage=3, deflate=True)
-            for folder in folders:
-                d = os.path.join(outdir, folder)
-                os.makedirs(d, exist_ok=True)
-                with open(unique(os.path.join(d, safe(title) + '.pdf')), 'wb') as fh:
-                    fh.write(data)
-                n_pdf += 1
-        c.close()
+    # Build into a staging folder next to outdir, then swap it in, so the old
+    # export survives any failure and nothing is deleted before the new one exists.
+    parent = os.path.dirname(os.path.abspath(outdir))
+    os.makedirs(parent, exist_ok=True)
+    stage = tempfile.mkdtemp(prefix='.msb2pdf-new-', dir=parent)
+    try:
+        with tempfile.TemporaryDirectory() as work:
+            print('Reading backup...')
+            dbpath, filedir = extract(msb, work)
+            n_pdf, n_ann = export(dbpath, filedir, stage, flat)
+    except BaseException:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    replace_dir(stage, outdir)
     print(f'\nDone: {n_pdf} PDFs, {n_ann} annotations -> {outdir}')
 
+
+def export(dbpath, filedir, outdir, flat):
+    c = sqlite3.connect(dbpath)
+    colls = {}
+    for sid, name in c.execute('select cs.SongId,c.Name from CollectionSong cs '
+                               'join Collections c on c.Id=cs.CollectionId'):
+        colls.setdefault(sid, []).append(name)
+    songs = c.execute('select Id,Title from Songs order by Title collate nocase').fetchall()
+    n_pdf = n_ann = 0
+    for i, (sid, title) in enumerate(songs, 1):
+        print(f'[{i}/{len(songs)}] {title}')
+        doc = build_song(c, filedir, sid, title)
+        if doc is None:
+            continue
+        n_ann += draw_annotations(c, doc, sid)
+        folders = ['.'] if flat else [safe(x) for x in colls.get(sid, ['_No collection'])]
+        data = doc.tobytes(garbage=3, deflate=True)
+        for folder in folders:
+            d = os.path.join(outdir, folder)
+            os.makedirs(d, exist_ok=True)
+            with open(unique(os.path.join(d, safe(title) + '.pdf')), 'wb') as fh:
+                fh.write(data)
+            n_pdf += 1
+    c.close()
+    return n_pdf, n_ann
+
+
+def replace_dir(new, target):
+    """Move folder `new` to `target`, removing whatever was there before."""
+    if not os.path.exists(target):
+        os.rename(new, target)
+        return
+    old = tempfile.mkdtemp(prefix='.msb2pdf-old-', dir=os.path.dirname(os.path.abspath(target)))
+    os.rmdir(old)
+    try:
+        os.rename(target, old)
+    except OSError as e:
+        sys.exit(f'Could not move the old export out of the way ({e}).\n'
+                 f'The new export is complete in {new} - rename it yourself.')
+    os.rename(new, target)
+    for attempt in range(3):
+        shutil.rmtree(old, ignore_errors=True)
+        if not os.path.exists(old):
+            return
+        time.sleep(1)
+    print(f'Warning: could not fully delete the old export in {old}\n'
+          f'(another program, e.g. a sync client, may be writing to it). Remove it by hand.')
 
 if __name__ == '__main__':
     main()

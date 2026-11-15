@@ -28,7 +28,7 @@ python3 msb2pdf.py BACKUP.msb [OUTPUT_DIR] [--flat] [--yes]
 | `--flat` | Put all PDFs in one folder instead of one subfolder per collection. |
 | `-y`, `--yes` | Overwrite an existing `OUTPUT_DIR` without asking. |
 
-If `OUTPUT_DIR` already has files in it, the script asks before replacing it and warns if any of them aren't PDFs. The old contents are deleted only after the backup has been read successfully, so a broken backup won't wipe your previous export. When it isn't run from a terminal (e.g. from cron), it stops unless `--yes` is given. It refuses to overwrite your home folder or a folder that contains the backup itself.
+If `OUTPUT_DIR` already has files in it, the script asks before replacing it and warns if any of them aren't PDFs. The new export is built in a hidden staging folder next to `OUTPUT_DIR` and swapped in only when it's complete, so a broken backup or an interrupted run leaves your previous export untouched. If the old copy can't be fully deleted afterwards (cloud-synced or encrypted folders such as Cryptomator vaults sometimes lag), you get a warning naming the leftover `.msb2pdf-old-…` folder instead of a crash. When it isn't run from a terminal (e.g. from cron), it stops unless `--yes` is given. It refuses to overwrite your home folder or a folder that contains the backup itself.
 
 Example:
 
