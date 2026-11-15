@@ -18,14 +18,17 @@ python3 -m venv ~/.venvs/msb && ~/.venvs/msb/bin/pip install -r requirements.txt
 ## Usage
 
 ```sh
-python3 msb2pdf.py BACKUP.msb [OUTPUT_DIR] [--flat]
+python3 msb2pdf.py BACKUP.msb [OUTPUT_DIR] [--flat] [--yes]
 ```
 
 | Argument | Meaning |
 |---|---|
 | `BACKUP.msb` | Backup made in MobileSheets (Settings → Backup). |
-| `OUTPUT_DIR` | Where to write the PDFs. Defaults to `<backup name>_pdf` next to the backup. It must not exist yet or must be empty. |
+| `OUTPUT_DIR` | Where to write the PDFs. Defaults to `<backup name>_pdf` next to the backup. |
 | `--flat` | Put all PDFs in one folder instead of one subfolder per collection. |
+| `-y`, `--yes` | Overwrite an existing `OUTPUT_DIR` without asking. |
+
+If `OUTPUT_DIR` already has files in it, the script asks before replacing it and warns if any of them aren't PDFs. The old contents are deleted only after the backup has been read successfully, so a broken backup won't wipe your previous export. When it isn't run from a terminal (e.g. from cron), it stops unless `--yes` is given. It refuses to overwrite your home folder or a folder that contains the backup itself.
 
 Example:
 
@@ -61,12 +64,15 @@ All integers are big-endian.
 Annotation data in the database:
 
 - **`AnnotationsBase`:** song, page, type (0 text, 1 pen, 2 highlighter, 3 stamp, 6 line), opacity (percent), zoom and version.
-- **`AnnotationPoints.Points`:** little-endian doubles. Pen and highlighter: `[flag, n, width, x0, y0, x1, y1, …]`, with `(FLT_MAX, FLT_MAX)` separating sub-strokes. Line: `[x0, y0, x1, y1]`. Text box: `[x0, y0, x1, y1, …]`. Stamp: `[x, y]`.
+- **`AnnotationPoints.Points`:** little-endian doubles. Pen and highlighter: `[flag, n, width, x0, y0, x1, y1, …]`, with `(FLT_MAX, FLT_MAX)` separating sub-strokes.
+  - `flag = 0` (newer annotations): each sub-stroke is a fitted cubic Bézier chain, `p0, (c1, c2, p1), (c1, c2, p2), …`. Joining the points with straight lines turns circles into triangles.
+  - `flag = 1` (old v0 annotations): raw touch points. These are drawn as midpoint-quadratic curves.
+  - Line: `[x0, y0, x1, y1]`. Text box: `[x0, y0, x1, y1, …]`. Stamp: `[x, y]`.
 - **Coordinates:**
   - Version 0: screen pixels at `Zoom`, so page point = value / Zoom.
   - Version 2/3: source-page units (`SourcePageWidth` × `SourcePageHeight`), scaled to the PDF page.
   - Crop settings don't affect annotation coordinates.
-- **Stamp anchors:** the stored point is about 0.87 × stamp size above the notehead.
+- **Stamp anchors:** for note stamps the stored point is the top of the stem. The notehead centre is 0.165 × size to the right and 0.88 × size below it.
 - **Rotated pages:** coordinates are in the visible (rotated) orientation.
 
 ## License

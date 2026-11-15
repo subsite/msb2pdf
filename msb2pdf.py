@@ -2,10 +2,14 @@
 """Export a MobileSheets backup (.msb) to PDFs with annotations burned in.
 
 Usage:
-    python3 msb2pdf.py BACKUP.msb [OUTPUT_DIR] [--flat]
+    python3 msb2pdf.py BACKUP.msb [OUTPUT_DIR] [--flat] [--yes]
 
     OUTPUT_DIR  defaults to "<backup name>_pdf" next to the backup.
     --flat      put all PDFs in one folder instead of one subfolder per Collection.
+    -y, --yes   overwrite an existing OUTPUT_DIR without asking.
+
+If OUTPUT_DIR already has files in it you are asked before it is replaced.
+Its old contents are deleted only after the backup has been read successfully.
 
 Songs that are in no collection go to "_No collection". A song that is in
 several collections is written to each of those folders.
@@ -17,6 +21,7 @@ Licensed under the GNU General Public License v3.0; see LICENSE.
 """
 import os
 import re
+import shutil
 import sqlite3
 import struct
 import sys
@@ -178,23 +183,59 @@ def text_kwargs(text):
         return {'fontname': 'uni', 'fontfile': FONTFILE} if FONTFILE else {'fontname': 'helv'}
 
 
-def draw_note(pg, anchor, size, col, dm, hx=-0.1):
+def draw_note(pg, anchor, size, col, dm):
     """Quarter-note stamp drawn as vectors (no font needed).
 
-    MobileSheets stores the stamp anchor ~0.87 x stamp size above the notehead
-    (measured against the app); size is the stamp's Size in page units.
+    Geometry measured against MobileSheets' own rendering, in units of the
+    stamp's Size (page units): the stored point is the top of the stem; the
+    notehead centre is 0.165 right of and 0.88 below it.
     """
+    import math
     sh = pg.new_shape()
-    hw, hh = size * 0.17, size * 0.12
-    head = fitz.Point(anchor.x + size * hx, anchor.y + size * 0.87)
-    # ellipse in visible coords, then derotate the bounding points
-    r = fitz.Rect(head.x - hw, head.y - hh, head.x + hw, head.y + hh)
-    sh.draw_oval(fitz.Quad(r.tl * dm, r.tr * dm, r.bl * dm, r.br * dm))
-    sh.finish(fill=col, color=col, width=0)
-    sx = head.x + hw - size * 0.03
-    sh.draw_line(fitz.Point(sx, head.y) * dm, fitz.Point(sx, head.y - size * 1.07) * dm)
-    sh.finish(color=col, width=max(size * 0.06, 0.4))
+    cx, cy = anchor.x + size * 0.165, anchor.y + size * 0.88
+    rx, ry, tilt = size * 0.17, size * 0.11, math.radians(-20)
+    ct, st = math.cos(tilt), math.sin(tilt)
+    head = []
+    for i in range(24):
+        t = 2 * math.pi * i / 24
+        x, y = rx * math.cos(t), ry * math.sin(t)
+        head.append(fitz.Point(cx + x * ct - y * st, cy + x * st + y * ct) * dm)
+    sh.draw_polyline(head + head[:1])
+    sh.finish(fill=col, color=col, width=0, closePath=True)
+    stem_x = anchor.x + size * 0.33
+    sh.draw_line(fitz.Point(stem_x, cy - size * 0.02) * dm, fitz.Point(stem_x, anchor.y) * dm)
+    sh.finish(color=col, width=max(size * 0.04, 0.3))
     sh.commit()
+
+
+def draw_bezier_chain(shape, pts):
+    """Newer MobileSheets strokes (header flag 0) are stored as fitted cubic
+    Bezier chains: p0, (c1, c2, p1), (c1, c2, p2), ..."""
+    if len(pts) < 4 or len(pts) % 3 != 1:
+        draw_smooth(shape, pts)
+        return
+    for i in range(0, len(pts) - 3, 3):
+        shape.draw_bezier(pts[i], pts[i + 1], pts[i + 2], pts[i + 3])
+
+
+def draw_smooth(shape, pts):
+    """Old strokes (header flag 1) are raw touch points. Draw them the way Android
+    ink paths usually are: quadratic curves
+    with each recorded point as control point and the midpoints between
+    consecutive points as anchors."""
+    if len(pts) < 3:
+        shape.draw_polyline(pts if len(pts) > 1 else [pts[0], pts[0] + (0.01, 0)])
+        return
+
+    def quad(p0, c, p1):  # quadratic -> cubic Bezier
+        shape.draw_bezier(p0, p0 + (c - p0) * (2 / 3), p1 + (c - p1) * (2 / 3), p1)
+
+    cur = pts[0]
+    for i in range(1, len(pts) - 1):
+        mid = (pts[i] + pts[i + 1]) * 0.5
+        quad(cur, pts[i], mid)
+        cur = mid
+    shape.draw_line(cur, pts[-1])
 
 
 def draw_annotations(c, doc, sid):
@@ -247,7 +288,12 @@ def draw_annotations(c, doc, sid):
                     continue
                 shape = pg.new_shape()
                 for s in strokes:
-                    shape.draw_polyline(s if len(s) > 1 else [s[0], s[0] + (0.01, 0)])
+                    if typ == 6:
+                        shape.draw_polyline(s if len(s) > 1 else [s[0], s[0] + (0.01, 0)])
+                    elif a[0] == 0:
+                        draw_bezier_chain(shape, s)
+                    else:
+                        draw_smooth(shape, s)
                 shape.finish(color=col[:3], width=max(width * sx, 0.3), closePath=False,
                              lineCap=1, lineJoin=1, stroke_opacity=alpha * (col[3] or 1))
                 shape.commit()
@@ -308,20 +354,56 @@ def unique(path):
     return path
 
 
+def confirm_overwrite(outdir, msb, assume_yes):
+    """Return True if outdir should be cleared before writing."""
+    if not os.path.isdir(outdir):
+        if os.path.exists(outdir):
+            sys.exit(f'{outdir} exists and is not a folder.')
+        return False
+    entries = os.listdir(outdir)
+    if not entries:
+        return False
+    out_abs = os.path.realpath(outdir)
+    msb_abs = os.path.realpath(msb)
+    if msb_abs.startswith(out_abs + os.sep) or out_abs in (os.path.realpath(os.path.expanduser('~')), os.sep):
+        sys.exit(f'Refusing to overwrite {outdir}: pick a dedicated output folder.')
+    files = [os.path.join(r, f) for r, _, fs in os.walk(outdir) for f in fs]
+    other = [f for f in files if not f.lower().endswith('.pdf')]
+    if assume_yes:
+        return True
+    if not sys.stdin.isatty():
+        sys.exit(f'Output folder {outdir} is not empty. Use --yes to overwrite it.')
+    print(f'Output folder {outdir} already exists ({len(files)} files).')
+    if other:
+        print(f'  WARNING: {len(other)} of them are not PDFs, e.g. {os.path.relpath(other[0], outdir)}')
+    ans = input('Delete its contents and write a fresh export? [y/N] ').strip().lower()
+    if ans not in ('y', 'yes'):
+        sys.exit('Aborted.')
+    return True
+
+
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith('--')]
-    flat = '--flat' in sys.argv
-    if not args or '-h' in sys.argv or '--help' in sys.argv:
+    opts = {a for a in sys.argv[1:] if a.startswith('-')}
+    args = [a for a in sys.argv[1:] if not a.startswith('-')]
+    flat = '--flat' in opts
+    unknown = opts - {'--flat', '-y', '--yes', '-h', '--help'}
+    if unknown:
+        sys.exit(f'Unknown option(s): {" ".join(sorted(unknown))}. See --help.')
+    if not args or opts & {'-h', '--help'}:
         print(__doc__)
         sys.exit(0 if args else 1)
     msb = args[0]
+    if not os.path.isfile(msb):
+        sys.exit(f'Backup not found: {msb}')
     outdir = args[1] if len(args) > 1 else os.path.splitext(msb)[0] + '_pdf'
-    if os.path.exists(outdir) and os.listdir(outdir):
-        sys.exit(f'Output folder {outdir} exists and is not empty - remove it or pick another.')
+    clear = confirm_overwrite(outdir, msb, opts & {'-y', '--yes'})
 
     with tempfile.TemporaryDirectory() as work:
         print('Reading backup...')
         dbpath, filedir = extract(msb, work)
+        if clear:
+            shutil.rmtree(outdir)
+        os.makedirs(outdir, exist_ok=True)
         c = sqlite3.connect(dbpath)
         colls = {}
         for sid, name in c.execute('select cs.SongId,c.Name from CollectionSong cs '

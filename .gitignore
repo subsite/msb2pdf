@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 *.msb
 *_pdf/
+tmp/
