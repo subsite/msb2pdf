@@ -10,9 +10,9 @@ MobileSheets keeps annotations (pen strokes, highlights, text boxes, stamps) in 
 - [PyMuPDF](https://pymupdf.readthedocs.io/)
 
 ```sh
-pip install pymupdf
+pip install -r requirements.txt
 # or, if your system Python is externally managed:
-python3 -m venv ~/.venvs/msb && ~/.venvs/msb/bin/pip install pymupdf
+python3 -m venv ~/.venvs/msb && ~/.venvs/msb/bin/pip install -r requirements.txt
 ```
 
 ## Usage
